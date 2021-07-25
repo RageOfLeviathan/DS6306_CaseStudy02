@@ -1,0 +1,20 @@
+---
+title: "DS6306 Case Study 02"
+author: "Will Rogers"
+date: "8/7/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(tidyverse)
+dir = 'C:/Users/chief/Documents/SMU/Coursework/DS6306_DoingDataScience/DataSets'
+fname1 = 'Attrition.csv'
+fpath1 = paste(dir,fname1,sep='/')
+
+attrition = read.csv(fpath1)
+```
