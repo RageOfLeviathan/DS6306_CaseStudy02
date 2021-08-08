@@ -9,12 +9,577 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+set.seed(39821638)
+n_seeds = 500
+seeds = sample(1:(10*n_seeds),n_seeds)
+```
+
+# Presentation Link
+https://youtu.be/KjhYMem92B4
+
 # Introduction
+We have been tasked with using data science to identify trends in that lead to attrition and then fit a model that will have success in identifying individuals that are likely to leave the company. We have been given a dataset that contains employee information to conduct our analysis on.
+
+# EDA
+A summary of the variables in our data set can been seen below. Our first step will be to clean the data into a more usable format. 
 ```{r, echo=FALSE, message = FALSE, warning=FALSE}
 library(tidyverse)
 dir = 'C:/Users/chief/Documents/SMU/Coursework/DS6306_DoingDataScience/DataSets'
 fname1 = 'Attrition.csv'
 fpath1 = paste(dir,fname1,sep='/')
 
-attrition = read.csv(fpath1)
+attrition = read.csv(fpath1,stringsAsFactors = TRUE)
+
+summary(attrition)
+```
+
+## Cleaning Data
+The first step taken to clean that data was to check how many of the fields candidates to use at all. This means removing variables that only have one value or are unique for every single entry. The variables that were removed from the data set and the number of unique values they contain can be seen below. As a reminder the data set contains 870 observations
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+nunique = function(col){length(unique(col))}
+sel_col = unlist(lapply(attrition, nunique))
+arrange(as.data.frame(sel_col),sel_col) %>% filter(sel_col <= 1 | sel_col == nrow(attrition))
+```
+
+## Transformations
+The only transform deemed necessary was to put MonthlyIncome on the log scale since it was heavily right skewed.
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(ggplot2)
+library(ggpubr)
+cleaned = attrition[,sel_col > 1 & sel_col < nrow(attrition)]
+
+p.raw = cleaned %>% ggplot(aes(x=MonthlyIncome)) + geom_histogram() +
+  xlab('Monthly Income')
+
+cleaned$MonthlyIncome = log(cleaned$MonthlyIncome)
+n_obs = nrow(cleaned)
+
+p.log = cleaned %>% ggplot(aes(x=MonthlyIncome)) + geom_histogram() +
+  xlab('Logged Monthly Income')
+
+ggarrange(p.raw,p.log,ncol = 2)
+```
+
+## Attrition Classification
+### Balance of Data
+Ideally, we would like to have balanced data during classification problems. The more imbalanced the data is, the more likely we will need to address it. A plot of the balance the Attrition variable is below. 
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(ggplot2)
+library(ggpubr)
+
+cleaned %>% group_by(Attrition) %>% count() %>% mutate(n=n/n_obs) %>%
+  ggplot(aes(x=Attrition, y = n,fill=Attrition)) + geom_bar(stat='identity') +
+  ylab('Percent') + xlab('') + ggtitle('Attrition Balance')
+```
+
+### Principal Component Analysis
+In an effort reduce the data a find important trends, a PCA is performed on the data. This will help us to find the most important combination of variables that explain the variance in the data. We can then reduce the data by taking a threshold value for the amount of variance we want to explain. 
+
+#### Number of Axes to Use
+After performing the PCA, the below plot was generated showing the relationship between number of PCA axes and the variance explained. In this case, 80% (0.8) was the value chosen. This corresponds to the first 12 Axes. 
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+num_cols = unlist(lapply(cleaned, is.numeric))  
+data.pca = prcomp(cleaned[,num_cols],scale = TRUE,center = TRUE)
+
+pca_var = data.pca$sdev^2
+var_exp = cumsum(pca_var)/sum(pca_var)
+ggplot() + geom_line(aes(x=1:length(pca_var),y=var_exp)) + 
+  ylab('Percent Variance Explained') +
+  xlab('Number Of Axes')
+
+use_axes = which(var_exp <= .80)
+```
+
+#### Top Three Axes
+One of the primary objectives of this investigation is to identify three important factors that lead to attrition according to our data set. The top three axes from our PCA are below with each sorted by the most influential variables in that axes.
+
+##### PC1
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+as.data.frame(data.pca$rotation[,1],nm = 'Axes') %>% arrange(desc(abs(Axes)))
+```
+
+##### PC2
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+as.data.frame(data.pca$rotation[,2],nm = 'Axes') %>% arrange(desc(abs(Axes)))
+```
+
+##### PC3
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+as.data.frame(data.pca$rotation[,3],nm = 'Axes') %>% arrange(desc(abs(Axes)))
+```
+
+##### Axes Explanation
+PC1 has the largest weights on variables that largely appear related to time and are positively correlated with each other. A way to summarize this axis is stability/ contentedness. Employees who have been working for a while and are overall satisfied with their job will have a high score on this axis.
+
+PC2 is roughly the opposite of PC1. The employee who is young and ambitious, but has not found something they are content with will score high on this axis. 
+
+PC3 contains variables that are related to overall job satisfaction. It is not a large stretch to say that employees are more satisfied if they get good performance ratings and larger salary increases. 
+
+##### Axes as Classifier
+Something that will help determine the kind of classifier we should use for this data is how well the numerical data alone is suited towards this kind of task. A method of this is plotting the first two PCA axes against each other and looking for separation in the classification of interest. This plot, for the attrition data, can be seen below. 
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+first_three = as.data.frame(data.pca$x[,1:3]) %>% mutate(Attrition=cleaned$Attrition) 
+first_three %>% ggplot(aes(x=PC1,y=PC2,col=Attrition)) + geom_point()
+```
+Based on this graph, there is not clear separation using the numerical data alone. There does appear to be tendency for 'Yes' attrition towards the negative value of PC1 but not enough to be considered clear separation. 
+
+### Categorical Analysis
+Since PCA only works on numerical data, the categorical variables are examined separately. The method used to find the important categorical variables was to calculate the odds ratio for Attrition of 'Yes' to 'No' for each level of every variable. The full list of these values can be seen below. 
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(fastDummies)
+cat_data = cleaned[,!num_cols] %>% select(!Attrition)
+
+attr_cat = fastDummies::dummy_cols(cat_data,remove_selected_columns = TRUE)
+total_each = colSums(attr_cat)
+total_yes = sum(cleaned$Attrition == 'Yes')
+total_no = sum(cleaned$Attrition == 'No')
+cat_yes = colSums(attr_cat[cleaned$Attrition == 'Yes',])
+cat_no = colSums(attr_cat[cleaned$Attrition == 'No',])
+cat_odds = (cat_yes/cat_no)/(total_yes/total_no)
+cat_odds
+```
+Values inside of defined threshold were then filtered out, leaving only the categorical variables with most influence on Attrition. The table below shows the remaining variables.
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+use_cat = cat_odds > 1.5 | cat_odds < (1/1.5)
+sort(cat_odds[use_cat],decreasing = TRUE)
+```
+Since dummy each original variable was spread out across multiple dummy variables to support the above analysis. The most important variables found above are a level of the original variable. This means that the most important variables to use in the analysis are these. 
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+cat_names = unique(gsub("_.*", "",names(cat_odds[use_cat])))
+cat_names
+```
+### Top Three Factors
+Based on the EDA above our best candidates for the top three factors that lead to employee attrition come from the most influential numerical and categorical variables. As a reminder the top numerical factors are considered to be the top principal components, and the top categorical factors are the variables that showed the most influence on the odds of attrition. Given that strongest odds come from variables that are levels of JobRole with SalesRep and Manager/Directors showing the most Influence. The next most influential categorical variable is MaritalStatus which has two levels that show strong influence. The last factor is the first PC, which we have identified in this study as overall employee contentedness. 
+In a list three important factors for employee retention are:
+- Contentedness
+- Job Role
+- Marital Status
+
+# Models 
+Given that we have identified the importance of a few categorical variables. The model we use for prediction should be able to account for these types of variables. At this time the models under consideration were a Naive Bayes model or a KNN model. Given that KNN can only work on numerical values, the Naive Bayes model was selected as the method to build a predictive model.
+
+## Attrition Prediction
+
+### Naive Bayes
+For comparisons sake the naive bayes approach was evaluated against four different times.
+1. All Variables Untransformed
+2. All Untransformed Numerical Value with Subset Categorical
+3. Principal Components with All Categorical Variables
+4. Principal Components with Subset Categorical
+
+#### All Untransformed Variables
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(e1071)
+library(class)
+library(caret)
+
+n_sample = nrow(cleaned)
+n_no = nrow(cleaned %>% filter(Attrition == 'No'))
+n_yes = nrow(cleaned %>% filter(Attrition == 'Yes'))
+
+n_train_no = floor(n_no * .7)
+n_train_yes = floor(n_yes * .7)
+mdata = cleaned
+mdata_no = mdata %>% filter(Attrition == 'No')
+mdata_yes = mdata %>% filter(Attrition == 'Yes')
+
+acc = data.frame()
+for(sv in 1:n_seeds){
+  set.seed(seeds[sv])
+  
+  train_ind_no = sample(1:n_no,n_train_no)
+  train_ind_yes = sample(1:n_yes,n_train_yes)
+  train = mdata_no[train_ind_no,] %>% add_row(mdata_yes[train_ind_yes,])
+  test = mdata_no[-train_ind_no,] %>% add_row(mdata_yes[-train_ind_yes,])
+  
+  model.nbayes = naiveBayes(Attrition ~ .,data=train)
+  
+  pred.nbayes = predict(model.nbayes,test)
+  pred.train = predict(model.nbayes,train)
+  
+  Cmat = confusionMatrix(test$Attrition,pred.nbayes,positive = 'Yes')
+  Cmat.train = confusionMatrix(train$Attrition,pred.train,positive = 'Yes')
+  
+  acc[sv,1] = seeds[sv]
+  acc[sv,2] = 'Test'
+  acc[sv,3] = Cmat$overall[1]
+  acc[sv,4] = Cmat$byClass[1]
+  acc[sv,5] = Cmat$byClass[2]
+  acc[sv+n_seeds,1] = seeds[sv]
+  acc[sv+n_seeds,2] = 'Train'
+  acc[sv+n_seeds,3] = Cmat.train$overall[1]
+  acc[sv+n_seeds,4] = Cmat.train$byClass[1]
+  acc[sv+n_seeds,5] = Cmat.train$byClass[2]
+}
+colnames(acc) = c('Seed','Set','Accuracy','Sensitivity','Specificity')
+
+p.acc = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Accuracy,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Accuracy,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.sen = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Sensitivity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Sensitivity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.spe = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Specificity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Specificity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+ggarrange(p.sen,p.spe,ncol=2)
+```
+
+##### T-test for Passing
+A t-test was used to see if the sampling of Sensitivity and Specificity was expected to be greater than 0.6 for each the test and training set.
+
+###### Train
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Train') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Train') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+The resulting p-value is very small, which allows us to reject the null hypothesis of the RMSE value being greater than 3000 for the train set.
+
+###### Test
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Test') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Test') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+
+#### All Untransformed Numerical Value with Subset Categorical
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(e1071)
+library(class)
+library(caret)
+
+n_sample = nrow(cleaned)
+n_no = nrow(cleaned %>% filter(Attrition == 'No'))
+n_yes = nrow(cleaned %>% filter(Attrition == 'Yes'))
+
+n_train_no = floor(n_no * .7)
+n_train_yes = floor(n_yes * .7)
+mdata = cbind(cleaned %>% select(c("Attrition",cat_names)) , cleaned[,num_cols])
+mdata_no = mdata %>% filter(Attrition == 'No')
+mdata_yes = mdata %>% filter(Attrition == 'Yes')
+
+acc = data.frame()
+for(sv in 1:n_seeds){
+  set.seed(seeds[sv])
+  
+  train_ind_no = sample(1:n_no,n_train_no)
+  train_ind_yes = sample(1:n_yes,n_train_yes)
+  train = mdata_no[train_ind_no,] %>% add_row(mdata_yes[train_ind_yes,])
+  test = mdata_no[-train_ind_no,] %>% add_row(mdata_yes[-train_ind_yes,])
+  
+  model.nbayes = naiveBayes(Attrition ~ .,data=train)
+  
+  pred.nbayes = predict(model.nbayes,test)
+  pred.train = predict(model.nbayes,train)
+  
+  Cmat = confusionMatrix(test$Attrition,pred.nbayes,positive = 'Yes')
+  Cmat.train = confusionMatrix(train$Attrition,pred.train,positive = 'Yes')
+  
+  acc[sv,1] = seeds[sv]
+  acc[sv,2] = 'Test'
+  acc[sv,3] = Cmat$overall[1]
+  acc[sv,4] = Cmat$byClass[1]
+  acc[sv,5] = Cmat$byClass[2]
+  acc[sv+n_seeds,1] = seeds[sv]
+  acc[sv+n_seeds,2] = 'Train'
+  acc[sv+n_seeds,3] = Cmat.train$overall[1]
+  acc[sv+n_seeds,4] = Cmat.train$byClass[1]
+  acc[sv+n_seeds,5] = Cmat.train$byClass[2]
+}
+colnames(acc) = c('Seed','Set','Accuracy','Sensitivity','Specificity')
+
+p.acc = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Accuracy,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Accuracy,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.sen = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Sensitivity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Sensitivity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.spe = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Specificity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Specificity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+ggarrange(p.sen,p.spe,ncol=2)
+```
+
+##### T-test for Passing
+A t-test was used to see if the sampling of Sensitivity and Specificity was expected to be greater than 0.6 for each the test and training set.
+
+###### Train
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Train') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Train') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+The resulting p-value is very small, which allows us to reject the null hypothesis of the RMSE value being greater than 3000 for the train set.
+
+###### Test
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Test') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Test') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+
+#### Principal Components with All Categorical Variables
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(e1071)
+library(class)
+library(caret)
+
+#n_sample = nrow(cleaned)
+
+n_no = nrow(cleaned %>% filter(Attrition == 'No'))
+n_yes = nrow(cleaned %>% filter(Attrition == 'Yes'))
+
+n_train_no = floor(n_no * .7)
+n_train_yes = floor(n_yes * .7)
+mdata = cbind(cleaned[,!num_cols],data.pca$x[,use_axes])
+mdata_no = mdata %>% filter(Attrition == 'No')
+mdata_yes = mdata %>% filter(Attrition == 'Yes')
+
+acc = data.frame()
+for(sv in 1:n_seeds){
+  set.seed(seeds[sv])
+  
+  train_ind_no = sample(1:n_no,n_train_no)
+  train_ind_yes = sample(1:n_yes,n_train_yes)
+  train = mdata_no[train_ind_no,] %>% add_row(mdata_yes[train_ind_yes,])
+  test = mdata_no[-train_ind_no,] %>% add_row(mdata_yes[-train_ind_yes,])
+  
+  model.nbayes = naiveBayes(Attrition ~ .,data=train)
+  
+  pred.nbayes = predict(model.nbayes,test)
+  pred.train = predict(model.nbayes,train)
+  
+  Cmat = confusionMatrix(test$Attrition,pred.nbayes,positive = 'Yes')
+  Cmat.train = confusionMatrix(train$Attrition,pred.train,positive = 'Yes')
+  
+  acc[sv,1] = seeds[sv]
+  acc[sv,2] = 'Test'
+  acc[sv,3] = Cmat$overall[1]
+  acc[sv,4] = Cmat$byClass[1]
+  acc[sv,5] = Cmat$byClass[2]
+  acc[sv+n_seeds,1] = seeds[sv]
+  acc[sv+n_seeds,2] = 'Train'
+  acc[sv+n_seeds,3] = Cmat.train$overall[1]
+  acc[sv+n_seeds,4] = Cmat.train$byClass[1]
+  acc[sv+n_seeds,5] = Cmat.train$byClass[2]
+}
+colnames(acc) = c('Seed','Set','Accuracy','Sensitivity','Specificity')
+
+p.acc = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Accuracy,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Accuracy,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.sen = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Sensitivity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Sensitivity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.spe = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Specificity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Specificity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+ggarrange(p.sen,p.spe,ncol=2)
+
+```
+##### T-test for Passing
+A t-test was used to see if the sampling of Sensitivity and Specificity was expected to be greater than 0.6 for each the test and training set.
+
+###### Train
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Train') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Train') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+The resulting p-value is very small, which allows us to reject the null hypothesis of the RMSE value being greater than 3000 for the train set.
+
+###### Test
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Test') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Test') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+
+
+#### Principal Components with Subset Categorical Variables
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+library(e1071)
+library(class)
+library(caret)
+
+n_no = nrow(cleaned %>% filter(Attrition == 'No'))
+n_yes = nrow(cleaned %>% filter(Attrition == 'Yes'))
+
+n_train_no = floor(n_no * .7)
+n_train_yes = floor(n_yes * .7)
+mdata = cbind(cleaned %>% select(c("Attrition",cat_names)) , data.pca$x[,use_axes])
+mdata_no = mdata %>% filter(Attrition == 'No')
+mdata_yes = mdata %>% filter(Attrition == 'Yes')
+
+acc = data.frame()
+for(sv in 1:n_seeds){
+  set.seed(seeds[sv])
+  
+  train_ind_no = sample(1:n_no,n_train_no)
+  train_ind_yes = sample(1:n_yes,n_train_yes)
+  train = mdata_no[train_ind_no,] %>% add_row(mdata_yes[train_ind_yes,])
+  test = mdata_no[-train_ind_no,] %>% add_row(mdata_yes[-train_ind_yes,])
+  
+  model.nbayes = naiveBayes(Attrition ~ .,data=train)
+  
+  pred.nbayes = predict(model.nbayes,test)
+  pred.train = predict(model.nbayes,train)
+  
+  Cmat = confusionMatrix(test$Attrition,pred.nbayes,positive = 'Yes')
+  Cmat.train = confusionMatrix(train$Attrition,pred.train,positive = 'Yes')
+  
+  acc[sv,1] = seeds[sv]
+  acc[sv,2] = 'Test'
+  acc[sv,3] = Cmat$overall[1]
+  acc[sv,4] = Cmat$byClass[1]
+  acc[sv,5] = Cmat$byClass[2]
+  acc[sv+n_seeds,1] = seeds[sv]
+  acc[sv+n_seeds,2] = 'Train'
+  acc[sv+n_seeds,3] = Cmat.train$overall[1]
+  acc[sv+n_seeds,4] = Cmat.train$byClass[1]
+  acc[sv+n_seeds,5] = Cmat.train$byClass[2]
+}
+colnames(acc) = c('Seed','Set','Accuracy','Sensitivity','Specificity')
+
+p.acc = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Accuracy,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Accuracy,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.sen = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Sensitivity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Sensitivity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+p.spe = ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=Specificity,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=Specificity,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+
+ggarrange(p.sen,p.spe,ncol=2)
+```
+
+##### T-test for Passing
+A t-test was used to see if the sampling of Sensitivity and Specificity was expected to be greater than 0.6 for each the test and training set.
+
+###### Train
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Train') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Train') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+The resulting p-value is very small, which allows us to reject the null hypothesis of the RMSE value being greater than 3000 for the train set.
+
+###### Test
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Test') %>% select(Sensitivity),mu = .6,alternative = 'greater')
+
+t.test(acc %>% filter(Set == 'Test') %>% select(Specificity),mu = .6,alternative = 'greater')
+```
+
+#### Model Selection
+Of the four options presented the option with the best predictive performance is number 3 which uses the principal component with all of the categorical predictors. However, option number 4 which uses the principal components with just a subset of the categorical variables is similar in its predictive performance and is a less complex model. 
+
+## Salary Prediction
+The final goal of this study was to predict MonthlyIncome with an RMSE of less that $3000. In order to do this, only a linear regression model was used at this time. 
+
+### Linear Regression
+
+#### All Untransformed Variables
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+n_train = floor(n_obs * .7)
+mdata = cleaned %>% select(!'Attrition')
+
+acc = data.frame()
+for(sv in 1:n_seeds){
+  set.seed(seeds[sv])
+  
+  train_ind = sample(1:n_obs,n_train)
+  train = mdata[train_ind,]
+  test = mdata[-train_ind,]
+  
+  model.reg = lm(MonthlyIncome ~ .,data=train)
+  
+  pred.test = predict(model.reg,test)
+  pred.train = predict(model.reg,train)
+  
+  acc[sv,1] = seeds[sv]
+  acc[sv,2] = 'Test'
+  acc[sv,3] = RMSE(exp(pred.test),exp(test$MonthlyIncome))
+  acc[sv+n_seeds,1] = seeds[sv]
+  acc[sv+n_seeds,2] = 'Train'
+  acc[sv+n_seeds,3] = RMSE(exp(pred.train),exp(train$MonthlyIncome))
+}
+colnames(acc) = c('Seed','Set','RMSE')
+
+ggplot() + 
+  geom_histogram(data = acc %>% filter(Set=='Train'),mapping = aes(x=RMSE,fill=Set),alpha = .7) +
+  geom_histogram(data = acc %>% filter(Set=='Test'),mapping = aes(x=RMSE,fill=Set),alpha = .3) +
+  theme(legend.position = c(0.2,.8))
+```
+
+#### T-test for Passing
+A t-test was used to see if the sampling of RMSE was expected to be less than $3000 for each the test and training set.
+
+##### Train
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Train') %>% select(RMSE),mu = 3000,alternative = 'less')
+```
+The resulting p-value is very small, which allows us to reject the null hypothesis of the RMSE value being greater than 3000 for the train set.
+
+##### Test
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+t.test(acc %>% filter(Set == 'Test') %>% select(RMSE),mu = 3000,alternative = 'less')
+```
+The resulting p-value is very small, which allows us to reject the null hypothesis of the RMSE value being greater than 3000 for the test set.
+
+#### Model Selection
+Since the model with all variables included, confidently meets are requirement, it is selected as the model to use for predicting MonthlyIncome.
+
+# Summary
+Over the course of this study we identified important factors that lead to employee attrition, the most important of these being Job Roles, Marital Status, and contentedness. We also built a predictive model that has a measure of success in determining if an employee is predicted to leave, as well as a predictive model for MonthlyIncome. Both of which meet the requirements set at the beginning of the case study. 
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# Make predictions for attrition data
+dir = 'C:/Users/chief/Documents/SMU/Coursework/DS6306_DoingDataScience/DataSets'
+fname1 = 'AttritionComp.csv'
+fpath1 = paste(dir,fname1,sep='/')
+
+attrition_comp = read.csv(fpath1,stringsAsFactors = TRUE)
+attrition_comp$MonthlyIncome = log(attrition_comp$MonthlyIncome)
+
+pred.attr_comp = predict(model.nbayes,attrition_comp)
+
+```
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# Make predictions for salary data
+dir = 'C:/Users/chief/Documents/SMU/Coursework/DS6306_DoingDataScience/DataSets'
+fname1 = 'SalaryComp.csv'
+fpath1 = paste(dir,fname1,sep='/')
+
+salary_comp = read.csv(fpath1,stringsAsFactors = TRUE)
+
+pred.salary_comp = exp(predict(model.reg,salary_comp))
+
+write.csv(pred.salary_comp,"Case2PredictionsRogers Salary.csv")
 ```
